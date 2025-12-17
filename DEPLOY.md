@@ -26,10 +26,12 @@
 
 1. 访问 [Vercel](https://vercel.com)
 2. 导入你的 GitHub 仓库
-3. 设置环境变量：
-   ```
-   NEXT_PUBLIC_SERVER_URL=https://your-app.up.railway.app
-   ```
+3. **重要**：在 Vercel 控制台中设置环境变量：
+   - 进入项目设置 → Environment Variables
+   - 添加环境变量：
+     - Key: `NEXT_PUBLIC_SERVER_URL`
+     - Value: `https://your-app.up.railway.app`（替换为你的 Railway 后端 URL）
+     - Environment: Production, Preview, Development（全选）
 4. 部署设置：
    - Framework Preset: Next.js
    - Build Command: `npm run build`
