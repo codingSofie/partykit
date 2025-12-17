@@ -1,0 +1,725 @@
+# ===============================
+# 🧩 Party Buzzer Web App Design
+# ===============================
+
+meta:
+  version: 2.0
+  author: Sofie
+  purpose: 搶答派對用網站
+  description: |
+    使用者可輸入房間密碼進入。第一位進入者自動成為主持人（Host）。
+    由主持人控制「開始 / 重新開始」。
+    當主持人點擊開始後，所有人可搶答。系統自動判定第一個點擊者並改變畫面顏色。
+  last_updated: 2024
+
+# ---------------------------------------------------------
+# 🔐 登入與房間控制
+# ---------------------------------------------------------
+room_system:
+  room_creation:
+    - method: 自動生成房間代碼
+      format: 6位數字或字母組合（如：ABC123）
+      uniqueness: 確保唯一性
+    - method: 房間密碼驗證
+      validation: 長度 4-8 字符，區分大小寫
+      error_handling: 密碼錯誤時顯示錯誤訊息
+  entry_flow:
+    - step: 輸入玩家名稱
+      field: player_name
+      validation: 必填，長度 1-20 字符
+    - step: 輸入房間代碼或密碼
+      field: room_code_or_password
+      action: join_room(room_code_or_password, player_name)
+    - condition: 若房間不存在
+      result: 創建新房間，設為主持人 host = true
+    - condition: 若房間存在但無玩家（空房間或原主持人已離開）
+      result: 設為主持人 host = true
+    - condition: 若房間已滿
+      result: 顯示錯誤 "房間已滿"
+    - condition: 否則（房間存在且有其他玩家）
+      result: host = false，加入為玩家
+  
+  exit_flow:
+    - step: 用戶點擊「退出房間」按鈕
+      action: leave_room(player_id, room_id)
+    - system_action:
+      - 從房間玩家列表中移除該玩家
+      - 如果該玩家是主持人，轉移主持人權限給最老的玩家
+      - 如果房間無人，關閉房間
+      - 廣播玩家離開事件給房間內其他玩家
+    - result: 返回首頁（輸入房間密碼狀態）
+    - ui_state:
+      - 清除房間相關數據
+      - 顯示登入頁面
+      - 重置所有遊戲狀態
+    - note: 退出房間後，用戶需要重新輸入房間密碼才能再次加入
+  room_settings:
+    max_players: 50
+    room_timeout: 30分鐘無活動自動關閉
+    password_required: false  # 可選，房間可設密碼保護
+  room_states:
+    - not_entered:
+        description: 未輸入房間密碼
+        ui: 顯示登入頁面（輸入玩家名稱和房間代碼）
+        actions: [join_room, create_room]
+    - entered:
+        description: 已輸入房間密碼並加入房間
+        ui: 顯示遊戲房間頁面
+        actions: [start_round, click_buzzer, reset_round, leave_room]
+        note: 每輪遊戲結束後，默認保持在 entered 狀態，除非用戶主動退出
+  roles:
+    - host:
+        permission:
+          - 可按「開始」按鈕
+          - 可按「重新開始」按鈕
+          - 可查看第一個搶答者
+          - 可踢出玩家（可選功能）
+          - 可關閉房間
+    - player:
+        permission:
+          - 只能按中間搶答按鈕（白色）
+          - 無法控制遊戲狀態
+          - 可退出房間（任何時候都可以）
+  connection:
+    protocol: WebSocket
+    reconnect:
+      enabled: true
+      max_attempts: 5
+      backoff: exponential (1s, 2s, 4s, 8s, 16s)
+    events:
+      - "player_join"
+      - "player_leave"
+      - "host_start"
+      - "player_click"
+      - "round_reset"
+      - "room_closed"
+      - "connection_error"
+
+# ---------------------------------------------------------
+# 🎨 UI 結構
+# ---------------------------------------------------------
+ui_layout:
+  pages:
+    - home:
+        components:
+          - player_name_input
+          - room_code_input
+          - join_button
+          - create_room_button
+          - error_message_display
+    - game_room:
+        components:
+          - header:
+              - room_code_display
+              - player_count_display
+              - host_indicator (if is_host)
+              - exit_room_button:
+                  visibility: 始終顯示（所有狀態下都可見）
+                  position: 右上角或底部固定位置
+                  text: "退出房間"
+                  confirmation: 可選，點擊後彈出確認對話框
+                  action: leave_room()
+          - control_panel (host only):
+              - start_button
+              - reset_button
+          - buzzer_area:
+              - buzzer_button
+              - status_message
+          - result_display:
+              - winner_name
+              - winner_highlight
+              - reaction_time (可選)
+          - player_list (可選):
+              - online_players
+              - click_order_display
+
+  buzzer_button_states:
+    - default: 
+        color: white
+        image: /asset/buttons/button_white.png
+        text: "按我搶答!"
+        enabled: true
+        animation: pulse (可選)
+    - first_clicker:
+        color: green
+        image: /asset/buttons/button_green.png
+        text: "你最快!"
+        enabled: false
+        animation: success_glow
+    - others_after_first:
+        color: red
+        image: /asset/buttons/button_red.png
+        text: "太慢了!"
+        enabled: false
+        animation: shake
+    - disabled:
+        color: gray
+        image: /asset/buttons/button_white.png  # 使用白色按鈕作為禁用狀態（或待實現灰色按鈕）
+        text: "等待中..."
+        enabled: false
+
+  responsive_design:
+    breakpoints:
+      - mobile: < 768px
+      - tablet: 768px - 1024px
+      - desktop: > 1024px
+    mobile_optimization:
+      - 全屏按鈕設計
+      - 簡化資訊顯示
+      - 觸控優化
+
+  feedback:
+    visual:
+      - 按鈕點擊動畫
+      - 顏色過渡效果
+      - 勝者高亮顯示
+    haptic:
+      - 移動設備震動反饋（可選）
+
+# ---------------------------------------------------------
+# ⚙️ 遊戲流程邏輯
+# ---------------------------------------------------------
+game_flow:
+  - phase: waiting_room
+    description: 玩家等待主持人點擊「開始」
+    state_mapping: 對應 state_machine 中的 "waiting" 狀態
+    ui_state:
+      all_buttons_disabled: true
+      buzzer_button_state: disabled
+      message: "請等待主持人開始..."
+      host_controls: start_button_enabled
+    validation:
+      - 至少需要 2 名玩家才能開始（可選規則）
+  - phase: active_round
+    trigger: host_clicks_start
+    state_mapping: 對應 state_machine 中的 "active" 狀態
+    system_action:
+      - 記錄服務器時間戳作為 start_time
+      - 清空上一輪的點擊記錄
+      - 廣播開始事件給所有玩家
+    ui_state:
+      buzzer_enabled: true
+      all_buttons_reset: white
+      message: "開始搶答!"
+      host_controls: reset_button_disabled
+    timing:
+      - 使用服務器時間戳確保公平性
+      - 記錄每個點擊的服務器時間（毫秒精度）
+  - phase: first_click
+    trigger: first_player_click (服務器判定)
+    system_action:
+      - 記錄第一個點擊者：player_id, server_timestamp
+      - 計算反應時間（可選）
+      - 立即鎖定所有按鈕
+      - 廣播結果：
+        - to_first_clicker: set_button(green), show_winner_message
+        - to_others: set_button(red), show_loser_message
+      - 記錄所有點擊順序（用於統計）
+      - 發送 round_locked 事件給所有玩家
+    ui_lock: disable_all_buttons
+    message_all: "搶答結束!"
+    state_mapping: 對應 state_machine 中的 "locked" 狀態
+    anti_cheat:
+      - 只接受服務器時間戳
+      - 忽略客戶端發送的時間戳
+      - 驗證點擊是否在 active_round 狀態
+  - phase: result_display
+    state_mapping: 對應 state_machine 中的 "result" 狀態
+    data:
+      winner_id: player_id_of_first_click
+      winner_name: player_name_of_first_click
+      reaction_time_ms: server_timestamp - start_time (可選)
+      click_order: array of {player_id, player_name, timestamp}
+    host_action:
+      can_reset_round: true
+      reset_button_enabled: true
+    display_duration: 5秒（可選，自動進入下一輪）
+    room_persistence:
+      - 默認行為：保持在房間內（entered 狀態）
+      - 不自動退出房間
+      - 用戶必須主動點擊「退出房間」才會離開
+      - 退出後返回 not_entered 狀態（輸入密碼頁面）
+  - phase: reset_round
+    trigger: host_clicks_reset
+    state_mapping: 從 "result" 或 "waiting" 狀態返回 "waiting" 狀態
+    system_action:
+      - 清空所有狀態
+      - 重置所有玩家按鈕為白色
+      - 返回 waiting_room 狀態
+    return_to_phase: waiting_room
+    room_persistence:
+      - 保持在房間內（entered 狀態）
+      - 不退出房間
+      - 所有玩家繼續留在房間中
+  - phase: error_state
+    triggers:
+      - connection_lost
+      - room_closed
+      - invalid_action
+    actions:
+      - 顯示錯誤訊息
+      - 提供重連選項
+      - 返回首頁（如房間關閉）
+
+# ---------------------------------------------------------
+# 🧠 狀態管理
+# ---------------------------------------------------------
+state_machine:
+  room_level_states:
+    - not_entered:
+        description: 未輸入房間密碼
+        ui: 顯示登入頁面（輸入玩家名稱和房間代碼）
+        can_access: 任何人都可以訪問
+    - entered:
+        description: 已輸入房間密碼並加入房間
+        ui: 顯示遊戲房間頁面
+        can_access: 需要成功加入房間
+        note: 退出房間後會返回 not_entered 狀態
+  
+  game_level_states:
+    - idle:
+        description: 初始狀態，未加入房間（等同於 not_entered）
+        ui: 顯示登入頁面
+        parent_state: not_entered
+    - waiting:
+        description: 已加入房間，等待主持人開始
+        ui: 顯示等待訊息，按鈕禁用
+        parent_state: entered
+        exit_room_available: true
+    - active:
+        description: 搶答進行中
+        ui: 按鈕啟用，顯示開始訊息
+        parent_state: entered
+        exit_room_available: true
+    - locked:
+        description: 已有第一個點擊者，鎖定狀態
+        ui: 所有按鈕禁用，顯示結果
+        parent_state: entered
+        exit_room_available: true
+    - result:
+        description: 顯示結果
+        ui: 顯示勝者資訊，主持人可重置
+        parent_state: entered
+        exit_room_available: true
+        note: 每輪結束後默認保持在 result 狀態，不自動退出房間
+    - error:
+        description: 錯誤狀態
+        ui: 顯示錯誤訊息
+        exit_room_available: true
+    - disconnected:
+        description: 連接中斷
+        ui: 顯示重連選項
+        exit_room_available: true
+  transitions:
+    - from: idle
+      to: waiting
+      trigger: join_room_success
+    - from: idle
+      to: error
+      trigger: join_room_failed
+    - from: waiting
+      to: active
+      trigger: host_start
+      condition: room_has_players
+    - from: active
+      to: locked
+      trigger: first_click_received
+      immediate: true
+    - from: locked
+      to: result
+      trigger: show_result
+      delay: 0ms (立即)
+    - from: result
+      to: waiting
+      trigger: host_reset
+    - from: result
+      to: active
+      trigger: host_reset_and_start (可選，一鍵重置並開始)
+    - from: [waiting, active, locked, result]
+      to: disconnected
+      trigger: connection_lost
+    - from: disconnected
+      to: waiting
+      trigger: reconnect_success
+      condition: game_state.current_phase == "waiting"
+    - from: disconnected
+      to: active
+      trigger: reconnect_success
+      condition: game_state.current_phase == "active"
+    - from: disconnected
+      to: locked
+      trigger: reconnect_success
+      condition: game_state.current_phase == "locked"
+      note: 如果重連時遊戲處於 locked 狀態（第一個點擊剛發生），應立即顯示結果
+    - from: disconnected
+      to: result
+      trigger: reconnect_success
+      condition: game_state.current_phase == "result"
+      note: 重連後根據服務器端實際遊戲狀態恢復對應狀態
+    - from: [waiting, active, locked, result]
+      to: idle
+      trigger: leave_room
+      action:
+        - 清除房間數據
+        - 斷開 WebSocket 連接（可選）
+        - 返回登入頁面（not_entered 狀態）
+      note: 退出房間後，房間狀態從 entered 變為 not_entered
+    - from: any
+      to: error
+      trigger: system_error
+
+# ---------------------------------------------------------
+# 📦 前端資料結構
+# ---------------------------------------------------------
+frontend_data:
+  user:
+    id: string (UUID)
+    name: string (1-20 chars)
+    is_host: boolean
+    joined_at: timestamp
+    connection_id: string (WebSocket connection ID)
+  room:
+    id: string (房間代碼，如 "ABC123")
+    password: string | null (可選)
+    created_at: timestamp
+    created_by: player_id
+    max_players: number (default: 50)
+    players:
+      - player_id: string
+        player_name: string
+        is_host: boolean
+        joined_at: timestamp
+        connection_status: "online" | "offline"
+  game_state:
+    current_phase: "waiting" | "active" | "locked" | "result"
+    round_active: boolean
+    round_number: number (累計回合數)
+    first_clicker_id: string | null
+    start_time: timestamp (服務器時間，毫秒精度)
+    end_time: timestamp | null
+    click_logs:
+      - player_id: string
+        player_name: string
+        server_timestamp: number (服務器時間戳，毫秒)
+        client_timestamp: number (客戶端時間戳，僅用於參考)
+        reaction_time_ms: number (計算得出)
+        order: number (點擊順序，1為最快)
+    winner:
+      player_id: string | null
+      player_name: string | null
+      reaction_time_ms: number | null
+  ui_flags:
+    buzzer_enabled: boolean
+    colors: { white, green, red, gray }
+    animations_enabled: boolean
+  connection:
+    status: "connected" | "connecting" | "disconnected" | "error"
+    reconnect_attempts: number
+    last_ping: timestamp
+
+# ---------------------------------------------------------
+# 🔊 WebSocket Events 設計
+# ---------------------------------------------------------
+websocket_events:
+  # 客戶端 -> 服務器
+  client_to_server:
+    - name: "join_room"
+      payload: 
+        room_code: string
+        player_name: string
+        password: string | null (可選)
+      response: "join_room_response"
+      errors:
+        - "room_not_found"
+        - "room_full"
+        - "invalid_password"
+        - "name_taken"
+    
+    - name: "create_room"
+      payload:
+        player_name: string
+        password: string | null (可選)
+      response: "create_room_response"
+      returns: { room_code: string }
+    
+    - name: "start_round"
+      payload: 
+        room_id: string
+        player_id: string (驗證是否為主持人)
+      response: "start_round_response"
+      errors:
+        - "not_host"
+        - "invalid_state"
+        - "insufficient_players"
+    
+    - name: "player_click"
+      payload: 
+        player_id: string
+        room_id: string
+        client_timestamp: number (僅用於參考，服務器會覆蓋)
+      response: "click_response"
+      errors:
+        - "not_in_active_round"
+        - "already_clicked"
+        - "invalid_state"
+    
+    - name: "reset_round"
+      payload: 
+        room_id: string
+        player_id: string (驗證是否為主持人)
+      response: "reset_round_response"
+      errors:
+        - "not_host"
+        - "invalid_state"
+    
+    - name: "leave_room"
+      payload:
+        player_id: string
+        room_id: string
+      response: "leave_room_response"
+      behavior:
+        - 用戶可以在任何遊戲狀態下退出房間
+        - 退出後返回登入頁面（not_entered 狀態）
+        - 需要重新輸入房間密碼才能再次加入
+      errors:
+        - "player_not_in_room"
+        - "invalid_room_id"
+    
+    - name: "ping"
+      payload: {}
+      response: "pong"
+      purpose: 保持連接活躍
+
+  # 服務器 -> 客戶端
+  server_to_client:
+    - name: "join_room_response"
+      payload:
+        success: boolean
+        room_data: room_object | null
+        user_data: user_object | null
+        error: string | null
+    
+    - name: "player_joined"
+      payload:
+        player_id: string
+        player_name: string
+        is_host: boolean
+        total_players: number
+      broadcast: true (發送給房間內所有玩家)
+    
+    - name: "player_left"
+      payload:
+        player_id: string
+        player_name: string
+        total_players: number
+        new_host_id: string | null (如果主持人離開，指定新主持人)
+        room_closed: boolean (如果房間無人，是否關閉)
+      broadcast: true
+    
+    - name: "leave_room_response"
+      payload:
+        success: boolean
+        message: string
+        redirect_to: "home" | "login"
+      note: 成功退出後，客戶端應切換到登入頁面（not_entered 狀態）
+    
+    - name: "round_started"
+      payload:
+        room_id: string
+        start_time: number (服務器時間戳)
+        round_number: number
+      broadcast: true
+    
+    - name: "click_response"
+      payload:
+        success: boolean
+        is_first_click: boolean
+        server_timestamp: number
+        reaction_time_ms: number | null
+        error: string | null
+      note: 發送給點擊者本人的即時響應
+    
+    - name: "round_locked"
+      payload:
+        first_clicker_id: string
+        first_clicker_name: string
+        server_timestamp: number
+      broadcast: true
+      note: 第一個點擊發生後立即廣播，通知所有玩家按鈕已鎖定（第一個點擊者按鈕變綠，其他人變紅）
+    
+    - name: "round_result"
+      payload:
+        winner_id: string
+        winner_name: string
+        reaction_time_ms: number
+        click_logs: array (所有點擊記錄)
+      broadcast: true
+    
+    - name: "round_reset"
+      payload:
+        room_id: string
+      broadcast: true
+    
+    - name: "room_closed"
+      payload:
+        reason: string
+      broadcast: true
+    
+    - name: "connection_error"
+      payload:
+        error_code: string
+        error_message: string
+        reconnect_available: boolean
+    
+    - name: "pong"
+      payload:
+        server_time: number
+
+# ---------------------------------------------------------
+# 🧩 特殊互動邏輯
+# ---------------------------------------------------------
+interaction_rules:
+  - rule: "Only one winner per round"
+    condition: first_click_server_timestamp == min(all_clicks_server_timestamp)
+    action: set_winner(player_id)
+    note: 使用服務器時間戳確保公平性
+  
+  - rule: "Disable buttons after first click"
+    action: 
+      - 立即鎖定所有按鈕
+      - 廣播鎖定狀態給所有玩家
+      - 忽略後續點擊請求
+    timing: 服務器收到第一個點擊後立即執行
+  
+  - rule: "Host-only restart"
+    condition: user.is_host == true AND game_state.current_phase == "result"
+    action: enable_reset_button
+    validation: 服務器端驗證 is_host 狀態
+  
+  - rule: "Prevent multi-click spam"
+    client_side: 
+      throttle: 500ms per player
+      disable_button_after_click: true
+    server_side:
+      - 記錄每個玩家在每輪的點擊次數
+      - 只接受每輪第一次點擊
+      - 忽略重複點擊請求
+  
+  - rule: "Anti-cheat: Server-side timestamp"
+    enforcement:
+      - 所有時間戳由服務器生成
+      - 客戶端時間戳僅用於參考（顯示用）
+      - 判定勝者時只使用服務器時間戳
+      - 拒絕未來時間戳（客戶端時間快於服務器）
+  
+  - rule: "State validation"
+    checks:
+      - 點擊只能在 "active" 狀態下接受
+      - 開始回合只能在 "waiting" 狀態下執行
+      - 重置可以在 "waiting" 或 "result" 狀態下執行（waiting 狀態重置為安全措施，result 狀態重置為正常流程）
+      - 拒絕無效狀態轉換
+  
+  - rule: "Host transfer on disconnect"
+    condition: host 離開或斷線
+    action:
+      - 選擇房間內最老的玩家作為新主持人
+      - 廣播主持人變更通知
+      - 如果房間無人，關閉房間
+  
+  - rule: "Room auto-cleanup"
+    condition: 房間無活動超過 30 分鐘
+    action:
+      - 關閉房間
+      - 通知所有玩家
+      - 清理資源
+  
+  - rule: "Concurrent click handling"
+    scenario: 多個玩家幾乎同時點擊（< 10ms 差異）
+    handling:
+      - 使用服務器接收順序判定
+      - 或使用更精確的時間戳（微秒級）
+      - 記錄所有接近的點擊時間差
+
+# ---------------------------------------------------------
+# 💾 資源檔案
+# ---------------------------------------------------------
+assets:
+  buttons:
+    - white: /asset/buttons/button_white.png
+    - green: /asset/buttons/button_green.png
+    - red: /asset/buttons/button_red.png
+    # gray: /asset/buttons/button_gray.png  # 待實現，目前使用白色按鈕作為禁用狀態
+  icons:
+    - host: /asset/icons/host.png
+    - player: /asset/icons/player.png
+    # trophy: /asset/icons/trophy.png  # 待實現
+    # clock: /asset/icons/clock.png  # 待實現
+  # images:
+    # background: /asset/images/background.jpg  # 待實現
+    # logo: /asset/images/logo.png  # 待實現
+
+# ---------------------------------------------------------
+# 🔒 安全性考量
+# ---------------------------------------------------------
+security:
+  input_validation:
+    - player_name: 過濾特殊字符，防止 XSS
+    - room_code: 只允許字母數字
+    - password: 長度限制，防止暴力破解
+  rate_limiting:
+    - join_room: 每 IP 每分鐘最多 10 次
+    - player_click: 每玩家每輪最多 1 次
+    - create_room: 每 IP 每小時最多 5 次
+  authentication:
+    - 使用 session token 或 JWT
+    - WebSocket 連接驗證
+    - 防止未授權操作
+  data_protection:
+    - 不記錄敏感資訊
+    - 房間數據定期清理
+    - 遵守隱私政策
+
+# ---------------------------------------------------------
+# 📊 性能優化
+# ---------------------------------------------------------
+performance:
+  frontend:
+    - 圖片懶加載
+    - 按鈕狀態快取
+    - 減少重渲染
+  backend:
+    - WebSocket 連接池管理
+    - 房間狀態記憶體快取
+    - 定期清理空房間
+    - 使用 Redis 做狀態共享（如多服務器部署）
+  network:
+    - 事件批量發送（如需要）
+    - 壓縮 WebSocket 訊息
+    - 心跳機制優化
+
+# ---------------------------------------------------------
+# 🧪 測試場景
+# ---------------------------------------------------------
+test_scenarios:
+  - scenario: "單人創建房間並開始"
+    steps: [create_room, start_round, click_button]
+  - scenario: "多人同時點擊"
+    steps: [join_room(3_players), start_round, simultaneous_clicks]
+  - scenario: "主持人斷線恢復"
+    steps: [host_disconnect, reconnect, verify_host_status]
+  - scenario: "房間滿員處理"
+    steps: [fill_room_to_max, attempt_join, verify_rejection]
+  - scenario: "無效狀態轉換"
+    steps: [try_invalid_actions, verify_error_handling]
+
+# ---------------------------------------------------------
+# 📝 待實現功能（可選）
+# ---------------------------------------------------------
+future_features:
+  - 統計功能：玩家勝率、平均反應時間
+  - 排行榜：房間內或全局
+  - 自訂主題：顏色
+  - 觀戰模式：只觀看，不參與
+  - 房間歷史記錄
+  - 移動端 App
+  - 多語言支援
